@@ -1,10 +1,10 @@
 # CUDA Stream Compaction
 
-University of Pennsylvania, CIS 5650: GPU Programming and Architecture, Project 1 - Flocking
+**University of Pennsylvania, CIS 5650: GPU Programming and Architecture, Project 2 - Stream Compaction**
 
-Faris Rafie Syahzani
-
-Tested on: Windows 11, AMD Ryzen 7 8845HS, NVIDIA GeForce RTX 4050 Laptop GPU (6 GB), 16 GB RAM
+- Faris Rafie Syahzani
+- Tested on: Windows 11, AMD Ryzen 7 8845HS, NVIDIA GeForce RTX 4050
+  Laptop GPU (6 GB), 16 GB RAM
 
 [How it works](#how-it-works) · [Results](#results) · [Reproduce](#reproduce) · [Correctness](#correctness) · [Next evidence](#next-evidence)
 
