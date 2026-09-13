@@ -32,6 +32,11 @@ inline int ilog2ceil(int x) {
 
 namespace StreamCompaction {
     namespace Common {
+        inline int& blockSize() {
+            static int value = 0;
+            return value;
+        }
+
         __global__ void kernMapToBoolean(int n, int *bools, const int *idata);
 
         __global__ void kernScatter(int n, int *odata,

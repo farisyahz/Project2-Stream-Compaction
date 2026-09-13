@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <vector>
 #include "cpu.h"
 
 #include "common.h"
@@ -17,13 +18,17 @@ namespace StreamCompaction {
          * For performance analysis, this is supposed to be a simple for loop.
          * (Optional) For better understanding before starting moving to GPU, you can simulate your GPU scan in this function first.
          */
-        void scan(int n, int *odata, const int *idata) {
-            timer().startCpuTimer();
+        static void scanImpl(int n, int *odata, const int *idata) {
             int acc = 0;
             for (int i = 0; i < n; ++i){
                 odata[i] = acc;
                 acc += idata[i];
             }
+        }
+
+        void scan(int n, int *odata, const int *idata) {
+            timer().startCpuTimer();
+            scanImpl(n, odata, idata);
             timer().endCpuTimer();
         }
 
@@ -52,25 +57,23 @@ namespace StreamCompaction {
          * @returns the number of elements remaining after compaction.
          */
         int compactWithScan(int n, int *odata, const int *idata) {
+            if (n <= 0) return 0;
+            std::vector<int> bools(n), indices(n);
             timer().startCpuTimer();
-            // Scan to odata first
-            int idx = 0;
             for (int i = 0; i < n; ++i){
-                odata[i] = idx;
-                if (idata[i] != 0){
-                    ++idx;
-                }
+                bools[i] = idata[i] != 0;
             }
+            scanImpl(n, indices.data(), bools.data());
 
             // scatter
             for (int i = 0; i < n; ++i){
                 if (idata[i] != 0){
-                    odata[odata[i]] = idata[i];
+                    odata[indices[i]] = idata[i];
                 }
             }
 
             timer().endCpuTimer();
-            return idx;
+            return indices[n - 1] + bools[n - 1];
         }
     }
 }

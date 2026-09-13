@@ -4,6 +4,9 @@ set(headers
     "naive.h"
     "efficient.h"
     "thrust.h"
+    "shared.h"
+    "radix.h"
+    "efficient_internal.h"
     )
 
 set(sources
@@ -12,6 +15,8 @@ set(sources
     "naive.cu"
     "efficient.cu"
     "thrust.cu"
+    "shared.cu"
+    "radix.cu"
     )
 
 list(SORT headers)
@@ -30,4 +35,6 @@ else()
 endif()
 target_compile_options(stream_compaction PRIVATE "$<$<AND:$<CONFIG:Debug,RelWithDebInfo>,$<COMPILE_LANGUAGE:CUDA>>:-G;-src-in-ptx>")
 target_compile_options(stream_compaction PRIVATE "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CUDA>>:-lineinfo;-src-in-ptx>")
-target_compile_options(stream_compaction PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>")
+if(MSVC)
+    target_compile_options(stream_compaction PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>")
+endif()

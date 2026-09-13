@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include "common.h"
 #include "efficient.h"
+#include "efficient_internal.h"
 
 namespace StreamCompaction {
     namespace Efficient {
@@ -12,8 +13,13 @@ namespace StreamCompaction {
             return timer;
         }
 
-        __global__ void kernUpSweep(int n, int stride, int *data) {
+        __global__ void kernUpSweep(int n, int stride, int *data, bool compactThreads) {
             int index = blockIdx.x * blockDim.x + threadIdx.x;
+            if (!compactThreads) {
+                if (index >= n || index % (stride * 2) != 0) return;
+                index /= stride * 2;
+            }
+            if (index >= n / (stride * 2)) return;
             int right = (index + 1) * stride * 2 - 1;
 
             if (right < n) {
@@ -21,8 +27,13 @@ namespace StreamCompaction {
             }
         }
 
-        __global__ void kernDownSweep(int n, int stride, int *data) {
+        __global__ void kernDownSweep(int n, int stride, int *data, bool compactThreads) {
             int index = blockIdx.x * blockDim.x + threadIdx.x;
+            if (!compactThreads) {
+                if (index >= n || index % (stride * 2) != 0) return;
+                index /= stride * 2;
+            }
+            if (index >= n / (stride * 2)) return;
             int right = (index + 1) * stride * 2 - 1;
 
             if (right < n) {
@@ -32,22 +43,22 @@ namespace StreamCompaction {
             }
         }
 
-        void scanDevice(int n, int *data) {
-            const int threadsPerBlock = 128;
+        void scanDevice(int n, int *data, bool compactThreads) {
+            const int threadsPerBlock = Common::blockSize() > 0 ? Common::blockSize() : 512;
 
             for (int stride = 1; stride < n; stride *= 2) {
-                int activeThreads = n / (stride * 2);
+                int activeThreads = compactThreads ? n / (stride * 2) : n;
                 int blocks = (activeThreads + threadsPerBlock - 1) / threadsPerBlock;
-                kernUpSweep<<<blocks, threadsPerBlock>>>(n, stride, data);
+                kernUpSweep<<<blocks, threadsPerBlock>>>(n, stride, data, compactThreads);
                 checkCUDAError("kernUpSweep failed");
             }
 
             cudaMemset(data + n - 1, 0, sizeof(int));
 
             for (int stride = n / 2; stride >= 1; stride /= 2) {
-                int activeThreads = n / (stride * 2);
+                int activeThreads = compactThreads ? n / (stride * 2) : n;
                 int blocks = (activeThreads + threadsPerBlock - 1) / threadsPerBlock;
-                kernDownSweep<<<blocks, threadsPerBlock>>>(n, stride, data);
+                kernDownSweep<<<blocks, threadsPerBlock>>>(n, stride, data, compactThreads);
                 checkCUDAError("kernDownSweep failed");
             }
         }
@@ -55,7 +66,7 @@ namespace StreamCompaction {
         /**
          * Performs prefix-sum (aka scan) on idata, storing the result into odata.
          */
-        void scan(int n, int *odata, const int *idata) {
+        static void scanHost(int n, int *odata, const int *idata, bool compactThreads) {
             if (n <= 0) {
                 return;
             }
@@ -70,11 +81,19 @@ namespace StreamCompaction {
             cudaMemcpy(devData, idata, inputBytes, cudaMemcpyHostToDevice);
 
             timer().startGpuTimer();
-            scanDevice(paddedN, devData);
+            scanDevice(paddedN, devData, compactThreads);
             timer().endGpuTimer();
 
             cudaMemcpy(odata, devData, inputBytes, cudaMemcpyDeviceToHost);
             cudaFree(devData);
+        }
+
+        void scan(int n, int *odata, const int *idata) {
+            scanHost(n, odata, idata, true);
+        }
+
+        void scanUnoptimized(int n, int *odata, const int *idata) {
+            scanHost(n, odata, idata, false);
         }
 
         /**
@@ -108,7 +127,7 @@ namespace StreamCompaction {
             cudaMemset(devBools, 0, paddedBytes);
 
             timer().startGpuTimer();
-            const int threadsPerBlock = 128;
+            const int threadsPerBlock = Common::blockSize() > 0 ? Common::blockSize() : 512;
             const int blocks = (n + threadsPerBlock - 1) / threadsPerBlock;
 
             Common::kernMapToBoolean<<<blocks, threadsPerBlock>>>(n, devBools, devInput);

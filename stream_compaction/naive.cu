@@ -49,7 +49,7 @@ namespace StreamCompaction {
             cudaMemcpy(dev_in, idata, bytes, cudaMemcpyHostToDevice);
             
             timer().startGpuTimer();
-            const int threadsPerBlock = 128;
+            const int threadsPerBlock = Common::blockSize() > 0 ? Common::blockSize() : 128;
             const int blocks = (n + threadsPerBlock - 1) / threadsPerBlock;
 
             for (int stride = 1; stride < n; stride *= 2){
@@ -64,9 +64,9 @@ namespace StreamCompaction {
             kernShiftExclusive<<<blocks, threadsPerBlock>>>(n, dev_out, dev_in);
             checkCUDAError("kernShiftExclusive failed");
             
-            cudaMemcpy(odata, dev_out, bytes, cudaMemcpyDeviceToHost);
-
             timer().endGpuTimer();
+
+            cudaMemcpy(odata, dev_out, bytes, cudaMemcpyDeviceToHost);
 
             cudaFree(dev_out);
             cudaFree(dev_in);
