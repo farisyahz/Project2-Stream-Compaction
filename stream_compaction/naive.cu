@@ -11,15 +11,65 @@ namespace StreamCompaction {
             static PerformanceTimer timer;
             return timer;
         }
-        // TODO: __global__
+        // TODO: __global__ [DONE]
+        __global__ void kernScanStep(int n, int strides, int *odata, const int *idata){
+            int index = blockIdx.x * blockDim.x + threadIdx.x;
+
+            if (index >= n) return;
+
+            if (index >= strides) {
+                odata[index] = idata[index] + idata[index - strides];
+            } else {
+                odata[index] = idata[index];
+            }
+        }
+
+        __global__ void kernShiftExclusive(int n, int* odata, const int* idata) {
+            int index = blockIdx.x * blockDim.x + threadIdx.x;
+
+            if (index < n) {
+                odata[index] = index == 0 ? 0 : idata[index -
+                1];
+            }
+        }
 
         /**
          * Performs prefix-sum (aka scan) on idata, storing the result into odata.
          */
         void scan(int n, int *odata, const int *idata) {
+            int *dev_out;
+            int *dev_in;
+            size_t bytes = n * sizeof(int);
+
+            if (n <= 0) return;
+
+            cudaMalloc(&dev_out, bytes);
+            cudaMalloc(&dev_in, bytes);
+
+            cudaMemcpy(dev_in, idata, bytes, cudaMemcpyHostToDevice);
+            
             timer().startGpuTimer();
-            // TODO
+            const int threadsPerBlock = 128;
+            const int blocks = (n + threadsPerBlock - 1) / threadsPerBlock;
+
+            for (int stride = 1; stride < n; stride *= 2){
+                kernScanStep<<<blocks, threadsPerBlock>>>(n, stride, dev_out, dev_in);
+                checkCUDAError("kernScanStep failed");
+
+                int *temp = dev_out;
+                dev_out = dev_in;
+                dev_in = temp;
+            }
+
+            kernShiftExclusive<<<blocks, threadsPerBlock>>>(n, dev_out, dev_in);
+            checkCUDAError("kernShiftExclusive failed");
+            
+            cudaMemcpy(odata, dev_out, bytes, cudaMemcpyDeviceToHost);
+
             timer().endGpuTimer();
+
+            cudaFree(dev_out);
+            cudaFree(dev_in);
         }
     }
 }
