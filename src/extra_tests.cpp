@@ -19,7 +19,7 @@ int main(int argc, char** argv) {
         if (size <= 0 || size > 16777216) return 1;
         std::vector<int> input(size, 1), output(size);
         std::string method = argv[2];
-        auto scan = method == "thrust" ? Thrust::scan : method == "efficient" ? Efficient::scan : method == "shared" ? Shared::scan : method == "naive" ? Naive::scan : nullptr;
+        auto scan = method == "thrust" ? Thrust::scan : method == "efficient" ? Efficient::scan : method == "shared" ? Shared::scan : method == "shared-unpadded" ? Shared::scanUnpadded : method == "naive" ? Naive::scan : nullptr;
         if (!scan) return 1;
         for (int warmup = 0; warmup < 3; ++warmup) scan(size, output.data(), input.data());
         cudaProfilerStart();

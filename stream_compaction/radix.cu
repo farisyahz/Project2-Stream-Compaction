@@ -33,11 +33,13 @@ namespace StreamCompaction {
             int *input;
             int *output;
             int *indices;
+
             cudaMalloc(&input, n * sizeof(int));
             cudaMalloc(&output, n * sizeof(int));
             cudaMalloc(&indices, padded * sizeof(int));
             cudaMemcpy(input, idata, n * sizeof(int), cudaMemcpyHostToDevice);
             checkCUDAError("Radix setup failed");
+
             timer().startGpuTimer();
             for (int bit = 0; bit < 32; ++bit) {
                 kernBitMask<<<(padded + threads - 1) / threads, threads>>>(n, padded, bit, input, indices);
@@ -48,6 +50,7 @@ namespace StreamCompaction {
                 std::swap(input, output);
             }
             timer().endGpuTimer();
+            
             cudaMemcpy(odata, input, n * sizeof(int), cudaMemcpyDeviceToHost);
             checkCUDAError("Radix download failed");
             cudaFree(input);

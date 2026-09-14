@@ -15,10 +15,13 @@ namespace StreamCompaction {
             int *current = storage;
             int *next = storage + blockDim.x;
             current[local] = index < n ? input[index] : 0;
+
             __syncthreads();
             for (int stride = 1; stride < blockDim.x; stride *= 2) {
                 next[local] = current[local] + (local >= stride ? current[local - stride] : 0);
+
                 __syncthreads();
+
                 int *temporary = current;
                 current = next;
                 next = temporary;
@@ -41,17 +44,23 @@ namespace StreamCompaction {
             int second = local + blockDim.x;
             storage[address<Padded>(local)] = base + local < n ? input[base + local] : 0;
             storage[address<Padded>(second)] = base + second < n ? input[base + second] : 0;
+
             __syncthreads();
+
             for (int stride = 1; stride < width; stride *= 2) {
                 int right = (local + 1) * stride * 2 - 1;
                 if (right < width) storage[address<Padded>(right)] += storage[address<Padded>(right - stride)];
+
                 __syncthreads();
             }
+
             if (local == 0) {
                 if (sums) sums[blockIdx.x] = storage[address<Padded>(width - 1)];
                 storage[address<Padded>(width - 1)] = 0;
             }
+
             __syncthreads();
+
             for (int stride = width / 2; stride > 0; stride /= 2) {
                 int right = (local + 1) * stride * 2 - 1;
                 if (right < width) {
@@ -61,7 +70,9 @@ namespace StreamCompaction {
                     storage[left] = storage[right];
                     storage[right] += temporary;
                 }
+
                 __syncthreads();
+
             }
             if (base + local < n) output[base + local] = storage[address<Padded>(local)];
             if (base + second < n) output[base + second] = storage[address<Padded>(second)];
@@ -77,6 +88,7 @@ namespace StreamCompaction {
             int width = mode == 0 ? threads : threads * 2;
             int blocks = (n + width - 1) / width;
             int *totals = blocks > 1 ? sums[level] : nullptr;
+
             if (mode == 0) {
                 kernNaiveBlocks<<<blocks, threads, threads * 2 * sizeof(int)>>>(n, input, output, totals);
             } else if (mode == 1) {
@@ -85,6 +97,7 @@ namespace StreamCompaction {
                 kernTreeBlocks<true><<<blocks, threads, (width + width / 32) * sizeof(int)>>>(n, input, output, totals);
             }
             checkCUDAError("Shared block scan failed");
+
             if (blocks > 1) {
                 scanLevel(blocks, sums[level], offsets[level], threads, mode, sums, offsets, level + 1);
                 kernAddOffsets<<<(n + threads - 1) / threads, threads>>>(n, width, output, offsets[level]);
@@ -98,11 +111,14 @@ namespace StreamCompaction {
             if (threads < 32 || threads > 1024 || (threads & (threads - 1))) {
                 throw std::invalid_argument("Shared scan requires a power-of-two block size between 32 and 1024");
             }
+
             int width = mode == 0 ? threads : threads * 2;
             int *input;
             int *output;
+
             cudaMalloc(&input, n * sizeof(int));
             cudaMalloc(&output, n * sizeof(int));
+
             std::vector<int*> sums, offsets;
             for (int count = (n + width - 1) / width; count > 1; count = (count + width - 1) / width) {
                 int *total;
@@ -112,13 +128,17 @@ namespace StreamCompaction {
                 sums.push_back(total);
                 offsets.push_back(offset);
             }
+
             cudaMemcpy(input, idata, n * sizeof(int), cudaMemcpyHostToDevice);
             checkCUDAError("Shared scan setup failed");
+
             timer().startGpuTimer();
             scanLevel(n, input, output, threads, mode, sums, offsets, 0);
             timer().endGpuTimer();
+
             cudaMemcpy(odata, output, n * sizeof(int), cudaMemcpyDeviceToHost);
             checkCUDAError("Shared scan download failed");
+            
             cudaFree(input);
             cudaFree(output);
             for (int *buffer : sums) cudaFree(buffer);
