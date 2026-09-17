@@ -1,4 +1,5 @@
 #include <stream_compaction/shared.h>
+#include <stream_compaction/cpu.h>
 #include <stream_compaction/efficient.h>
 #include <stream_compaction/radix.h>
 #include <stream_compaction/thrust.h>
@@ -7,6 +8,7 @@
 #include <algorithm>
 #include <climits>
 #include <iostream>
+#include <iterator>
 #include <numeric>
 #include <random>
 #include <string>
@@ -28,6 +30,46 @@ int main(int argc, char** argv) {
         return cudaDeviceSynchronize() == cudaSuccess && output.back() == size - 1 ? 0 : 1;
     }
     std::mt19937 random(565);
+    int coreChecks = 0;
+    Common::blockSize() = 0;
+    for (int size : {0, 1, 2, 3, 127, 128, 129, 253, 256, 257, 10000, 1000000}) {
+        for (int pattern = 0; pattern < 4; ++pattern) {
+            std::vector<int> input(size), expected(size), output(size + 1, -999);
+            for (int& value : input) {
+                value = pattern == 0 ? 0 : pattern == 1 ? 1 : static_cast<int>(random() % 11) - 5;
+            }
+            if (pattern == 3 && size > 0) input.back() = 0;
+            std::exclusive_scan(input.begin(), input.end(), expected.begin(), 0);
+            int method = 0;
+            for (auto scan : {CPU::scan, Naive::scan, Efficient::scan, Thrust::scan}) {
+                std::fill(output.begin(), output.end(), -999);
+                scan(size, output.data(), input.data());
+                if (cudaDeviceSynchronize() != cudaSuccess ||
+                    !std::equal(expected.begin(), expected.end(), output.begin()) || output[size] != -999) {
+                    std::cerr << "Core scan failed: method=" << method << " size=" << size << " pattern=" << pattern << '\n';
+                    return 1;
+                }
+                ++method;
+                ++coreChecks;
+            }
+            expected.clear();
+            std::copy_if(input.begin(), input.end(), std::back_inserter(expected), [](int value) { return value != 0; });
+            method = 0;
+            for (auto compact : {CPU::compactWithoutScan, CPU::compactWithScan, Efficient::compact}) {
+                std::fill(output.begin(), output.end(), -999);
+                int count = compact(size, output.data(), input.data());
+                if (cudaDeviceSynchronize() != cudaSuccess || count != static_cast<int>(expected.size()) ||
+                    !std::equal(expected.begin(), expected.end(), output.begin()) ||
+                    !std::all_of(output.begin() + expected.size(), output.end(), [](int value) { return value == -999; })) {
+                    std::cerr << "Core compaction failed: method=" << method << " size=" << size << " pattern=" << pattern << '\n';
+                    return 1;
+                }
+                ++method;
+                ++coreChecks;
+            }
+        }
+    }
+    std::cout << "PASS: " << coreChecks << " required scan/compaction checks\n";
     int checks = 0;
     for (int block : {64, 128, 256, 512}) {
         Common::blockSize() = block;

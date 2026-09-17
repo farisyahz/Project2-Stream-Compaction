@@ -116,7 +116,7 @@ We swept 64, 128, 256, and 512 threads per block. At 1,048,576 elements, the low
 | 256 | 0.117472 | 0.149376 | 0.119840 |
 | 512 | 0.126336 | 0.151392 | 0.122080 |
 
-This is a rough tuning pass at one input size. The fastest block size changed between preliminary and final runs, so small timing differences should not be treated as a firm ranking. The largest block was not the fastest shared-memory configuration.
+This is a rough tuning pass at one input size. The fastest block size varied across runs, so small timing differences should not be treated as a firm ranking. The largest block was not the fastest shared-memory configuration.
 
 ### Why do the results change with input size?
 
@@ -188,7 +188,7 @@ Blocks = ceil(useful threads / threads per block)
 Right node index = (thread index + 1) × 2 × stride - 1
 ```
 
-The grid now shrinks during the up-sweep and grows during the down-sweep. The final partial block still needs a bounds check. This changes which thread handles a node, not the scan result.
+The grid shrinks during the up-sweep and grows during the down-sweep. The final partial block still needs a bounds check. This changes which thread handles a node, not the scan result.
 
 #### Did the change help?
 
@@ -240,7 +240,7 @@ Benchmarks answer **which implementation is faster**. Profilers help explain **w
 
 ### Does padding actually remove bank conflicts?
 
-On September 14, 2026, Nsight Compute 2026.2.1 captured the first `kernTreeBlocks` launch for each shared tree variant. Both used a Release build, **1,048,576 ones**, three warm-ups, **4,096 blocks × 128 threads**, kernel replay, and the full metric set. Each block scans 256 values. The two captures measure the same first stage. They do not include all recursive scan stages and the kernels that add block offsets.
+Nsight Compute 2026.2.1 captured the first `kernTreeBlocks` launch for each shared tree variant. Both used a Release build, **1,048,576 ones**, three warm-ups, **4,096 blocks × 128 threads**, kernel replay, and the full metric set. Each block scans 256 values. The two captures measure the same first stage. They do not include all recursive scan stages and the kernels that add block offsets.
 
 | First-stage measurement | Unpadded | Padded |
 |---|---:|---:|
@@ -342,6 +342,7 @@ For the matched Nsight Compute comparison, use the Release `extra_tests.exe` wit
 - The root build adds `extra_tests` and registers it with CTest.
 - A local `analysis` target is created only when its ignored source file exists.
 - The MSVC-only `/Zc:preprocessor` option is passed through NVCC for CUDA and Thrust compatibility.
+- Both host and CUDA sources use C++17. The CMake 3.18–3.22 compatibility branch has its target-name typo corrected (`stream_compaction`, without a trailing brace).
 - During automation, duplicate `PATH` and `Path` entries had to be combined into one entry in the build process's environment.
 
 ### Local analysis workflow
@@ -364,9 +365,9 @@ For a controlled follow-up: connect AC power, record power mode, close GPU workl
 
 ### What was tested
 
-The successful test output and benchmark checks below were collected on September 13, 2026. The September 14 profiling captures are separate from these correctness results.
+The test output and benchmark checks below passed. Profiling captures are separate from these correctness results.
 
-The local test harness compares results with independent `std::exclusive_scan` and `std::copy_if` references. It checks output values, compaction counts, and a marker just past the expected output to catch writes beyond the valid result. Every timed scan output is also checked across all block-size candidates.
+The local test harness compares results with independent `std::exclusive_scan` and `std::copy_if` references. It checks output values, compaction counts, and a marker at the end of the allocated output to catch writes beyond the input length. Every timed scan output is also checked across all block-size candidates. The included `extra_tests` suite additionally checks that the entire output tail after a compaction's returned count remains untouched.
 
 ```text
 PASS: 528 independent scan/compaction checks
@@ -385,14 +386,17 @@ Measured n=4194304
 
 ### Additional test results
 
-The included `extra_tests` executable exercises all three shared scans and the fixed-grid baseline at four block sizes, then signed radix sorting:
+A fresh Release build in `build/audit` passed CTest on the RTX 4050. The included `extra_tests` executable checks all four required scans and all three required compaction methods against independent standard-library references. Its 336 required checks cover the 12 sizes and four patterns listed above, including one million elements and empty inputs. It verifies compaction counts and ensures the unused output tail is untouched. These checks run from a fresh clone without the ignored analysis harness.
+
+It also exercises all three shared scans and the fixed-grid baseline at four block sizes, then signed radix sorting:
 
 ```text
+PASS: 336 required scan/compaction checks
 Radix example: -7 -1 0 2 3 3
 PASS: 1058 extra-credit checks
 ```
 
-Testing large inputs revealed that inactive threads could overflow an integer while calculating a tree index. Kernels now return before calculating an inactive node's index. The full sweep then passed. No memory-sanitizer run is claimed.
+Inactive threads can overflow an integer while calculating a tree index for large inputs. Kernels avoid this by returning before calculating an inactive node's index. The full test sweep passed. No memory-sanitizer run is claimed.
 
 ### Starter test output
 

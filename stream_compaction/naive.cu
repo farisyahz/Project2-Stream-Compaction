@@ -11,7 +11,7 @@ namespace StreamCompaction {
             static PerformanceTimer timer;
             return timer;
         }
-        // TODO: __global__ [DONE]
+        // One Hillis-Steele step, reading and writing separate buffers.
         __global__ void kernScanStep(int n, int strides, int *odata, const int *idata){
             int index = blockIdx.x * blockDim.x + threadIdx.x;
 
