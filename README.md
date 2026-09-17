@@ -35,7 +35,6 @@ It compares CPU and CUDA scan algorithms, explores GPU optimizations, and uses s
   - [Build and run the tests](#build-and-run-the-tests)
   - [Profile one scan call](#profile-one-scan-call)
   - [CMake changes](#cmake-changes)
-  - [Local analysis workflow](#local-analysis-workflow)
 - [Correctness and test output](#correctness-and-test-output)
   - [What was tested](#what-was-tested)
   - [Additional test results](#additional-test-results)
@@ -344,22 +343,6 @@ For the matched Nsight Compute comparison, use the Release `extra_tests.exe` wit
 - The MSVC-only `/Zc:preprocessor` option is passed through NVCC for CUDA and Thrust compatibility.
 - Both host and CUDA sources use C++17. The CMake 3.18–3.22 compatibility branch has its target-name typo corrected (`stream_compaction`, without a trailing brace).
 - During automation, duplicate `PATH` and `Path` entries had to be combined into one entry in the build process's environment.
-
-### Local analysis workflow
-
-The directories `analysis/`, `scripts/`, and the source `src/analysis.cpp` are ignored as requested. They stay on this computer but are absent from a fresh clone. The repository builds and tests without them. Finished PNG figures remain included.
-
-On this working copy, measurements and plots can be regenerated with:
-
-```powershell
-.\build\bin\Release\analysis.exe analysis/results.json
-python scripts/plot_results.py
-python scripts/plot_profile.py
-```
-
-Plotting used Matplotlib 3.9.2. The profiler plot consumes the local SQLite export of `analysis/thrust-profile.nsys-rep`. If the data changes, update the report's tables and conclusions too.
-
-For a controlled follow-up: connect AC power, record power mode, close GPU workloads, rerun the block sweep, randomize configuration order, and repeat the selected configurations in another session. Then capture matched small/large Thrust calls to test the dispatch/overhead explanation. Collect hardware counters separately. Never mix profiled durations into the benchmark graph.
 
 ## Correctness and test output
 
