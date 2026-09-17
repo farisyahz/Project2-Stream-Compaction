@@ -8,9 +8,10 @@
 
 This project uses exclusive prefix sums to remove zeros from an array while preserving order. The same operation lets a renderer discard finished rays and spend later work on rays still in flight.
 
-It compares CPU and CUDA scan algorithms, explores GPU optimizations, and uses scan to build a signed integer radix sort. The measurements and profiler captures explain when each approach helps and where it still spends time.
+The project compares CPU and CUDA scan algorithms, improves GPU scan with shared memory, and uses scan to build a signed integer radix sort. The results show how input size, kernel launches, and memory access affect performance.
 
 ## Contents
+
 - [How it works](#how-it-works)
   - [Scan and compaction in one example](#scan-and-compaction-in-one-example)
   - [Features and algorithms](#features-and-algorithms)
@@ -45,7 +46,7 @@ It compares CPU and CUDA scan algorithms, explores GPU optimizations, and uses s
 
 ### Scan and compaction in one example
 
-An **exclusive scan** writes the sum of all earlier elements. To remove zeros, first mark each nonzero value with 1 and each zero with 0. Scanning this mask gives each value we keep its output position.
+An **exclusive scan** writes the sum of all earlier elements. To remove zeros, first mark each nonzero value with 1 and each zero with 0. Scanning this mask gives each retained value its output position.
 
 ```text
 Input          [1, 5, 0, 1, 2, 0, 3]
@@ -77,7 +78,7 @@ In the table, `n` is the number of input elements and `B` is the number of threa
 
 ### Input handling
 
-The global-memory efficient scan adds zeros until the working array reaches the next power of two. The shared-memory versions pad the last block, scan each block's total, and repeat that process when needed. CPU scan and compaction reuse a helper without its own timer so one timer does not start inside another.
+All implementations support both power-of-two and non-power-of-two input sizes. The global-memory efficient scan pads its working array with zeros to reach the next power of two. The shared-memory versions pad the last block and scan the block totals to combine results across blocks.
 
 Empty inputs return without touching output. Only the first returned `count` elements of compacted output are meaningful. Values and intermediate scan sums must fit in `int`. Arbitrary overlapping scan buffers are not supported.
 
@@ -89,9 +90,11 @@ Empty inputs return without touching output. Only the first returned `count` ele
 
 ### How do the scan implementations compare?
 
+**Among the four required implementations, the CPU is fastest for small inputs, naive GPU scan is fastest at about one million elements, and efficient GPU scan is fastest at about four million.** Thrust's performance depends on the overhead of the complete library call as well as its GPU kernels.
+
 ![Median scan time across input sizes](img/scan-scaling.png)
 
-Both axes use a logarithmic scale, so equal spacing represents a multiplication rather than a fixed increase. Lines show medians of 15 samples. Faint bands show samples 4 through 12 after sorting the 15 timings. This is roughly the middle half of the measurements, not a confidence interval. Lower is better. These are timed computation regions, **not full upload/compute/download latency**.
+Lower values mean faster scans. Both axes use a logarithmic scale to show the wide range of sizes and runtimes. Each line shows the median of 15 samples. The faint band covers samples 4 through 12 after sorting by duration, showing the spread of the measurements. The timings exclude initial allocation, input upload, output download, and cleanup.
 
 | Input integers | CPU (ms) | Naive (ms) | Efficient (ms) | Thrust (ms) |
 |---:|---:|---:|---:|---:|
@@ -100,13 +103,13 @@ Both axes use a logarithmic scale, so equal spacing represents a multiplication 
 | 1,048,577 | 0.524000 | 0.401792 | 0.639296 | 0.786432 |
 | 4,194,304 | 2.084200 | 4.143900 | 0.873248 | 0.937056 |
 
-These results describe one machine in one measurement session. They are not a universal ranking. Raw samples and plotting tools remain local and are intentionally ignored by Git. Finished figures and numeric summaries are included.
+These measurements describe the tested RTX 4050 laptop. The fastest method can change with the hardware and input size. The repository includes the figures and numeric summaries. Raw benchmark samples and plotting scripts are not distributed.
 
 ### Which block sizes work best?
 
 ![Block-size sweep at one million integers](img/block-sweep.png)
 
-We swept 64, 128, 256, and 512 threads per block. At 1,048,576 elements, the lowest median time selected **128 for naive**, **512 for efficient**, and **128 for each shared-memory variant**. These settings stay fixed throughout the comparisons and are the defaults in the source. Thrust manages its own launches. Compaction inherits the efficient setting. No separate compaction performance tuning is claimed.
+**The selected block sizes are 128 threads for naive scan, 512 for efficient scan, and 128 for each shared-memory variant.** These gave the lowest median times at 1,048,576 elements among the tested sizes of 64, 128, 256, and 512 threads. Each selected size stays fixed throughout the scaling comparison and is the default in the source. Thrust chooses its own launch configuration. Compaction uses the efficient scan setting and was not tuned separately.
 
 | Threads/block | Naive shared (ms) | Tree unpadded (ms) | Tree padded (ms) |
 |---:|---:|---:|---:|
@@ -115,21 +118,21 @@ We swept 64, 128, 256, and 512 threads per block. At 1,048,576 elements, the low
 | 256 | 0.117472 | 0.149376 | 0.119840 |
 | 512 | 0.126336 | 0.151392 | 0.122080 |
 
-This is a rough tuning pass at one input size. The fastest block size varied across runs, so small timing differences should not be treated as a firm ranking. The largest block was not the fastest shared-memory configuration.
+Larger blocks were not always faster. Block size affects how work is divided and how many blocks can run on each GPU processing unit. The selected values are a rough optimization for this input size. Small differences varied across runs.
 
 ### Why do the results change with input size?
 
-**Small inputs favor the CPU.** Its serial loop avoids GPU launch and scheduling overhead. CUDA event intervals include gaps between kernels, so these measurements are not sums of pure kernel durations.
+**Small inputs favor the CPU because it avoids GPU launch overhead.** A short serial loop can finish before the GPU has been given enough work to offset the cost of launching kernels.
 
-**Less work does not always mean less time.** For `n = 2^k`, naive launches `k` scan kernels plus one shift. Efficient launches `2k` kernels plus a root reset. At one million elements that is 21 versus 40 launches. Near the root, efficient has very little useful parallel work. This helps explain the medium-size result despite its lower operation count. [GPU Gems Chapter 39](https://developer.nvidia.com/gpugems/gpugems3/part-vi-gpu-computing/chapter-39-parallel-prefix-sum-scan-cuda) derives the work-complexity difference.
+**Naive scan can beat efficient scan because it launches fewer kernels.** For `n = 2^k`, naive launches `k` scan kernels plus one shift. Efficient launches `2k` kernels and resets the tree's root. At 1,048,576 elements, that is 21 versus 40 launches. Efficient scan also has very little parallel work near the root. These costs help explain why it can take longer even though it performs fewer additions. [GPU Gems Chapter 39](https://developer.nvidia.com/gpugems/gpugems3/part-vi-gpu-computing/chapter-39-parallel-prefix-sum-scan-cuda) explains the difference in operation counts.
 
-**At the largest size, fewer full-array passes pay off.** Naive rereads and rewrites nearly the entire array at each level. Efficient processes progressively fewer nodes. The point where efficient scan overtakes naive scan is consistent with this reduction in memory traffic. We have not measured whether either global-memory method reaches its bandwidth limit or exactly how much time goes to memory versus launches. The efficient scan also accesses values farther apart at deeper levels, so fewer additions do not automatically mean equally fewer memory transactions.
+**Efficient scan benefits more from large inputs because it does less total work.** Naive rereads and rewrites nearly the entire array at every level. Efficient processes progressively fewer tree nodes, reducing additions and memory traffic. This helps explain its advantage at four million elements. The exact split between launch overhead and memory access time was not measured.
 
-**Doubling padding does not double runtime here.** Going from 1,048,576 to 1,048,577 doubles efficient scan's padded array, but its median rises about 19.6%. CPU timing also changes between these adjacent sizes, illustrating cache and measurement variability. This just-over-a-power-of-two input is listed in the table rather than added to the scaling graph.
+**Padding adds work for non-power-of-two inputs.** Increasing the input from 1,048,576 to 1,048,577 doubles the efficient scan's padded array. Its measured runtime rises by about 19.6%. Runtime does not grow in direct proportion to storage because launch overhead and the amount of work at each tree level also matter. This extra input size appears in the table.
 
 ### What is slowing each version down?
 
-| Version | What the results suggest | What we can establish |
+| Version | Costs suggested by the results | Supporting result |
 |---|---|---|
 | CPU | The loop does more work as the input grows, but avoids GPU launch costs | It is fastest on the smallest inputs tested |
 | Naive GPU | Many full-array reads and writes become expensive on large inputs | At four million elements, efficient scan is 4.75× faster |
@@ -137,7 +140,7 @@ This is a rough tuning pass at one input size. The fastest block size varied acr
 | Shared-memory tree | Bank conflicts make the unpadded kernel do extra memory work | Matched counters fall from 1,146,880 conflicts to zero with padding |
 | Thrust | Allocation, synchronization, and scheduling add time around short kernels | The Systems trace shows these operations inside the timed call |
 
-The memory and launch explanations for the global scans follow from the algorithms and timing patterns. They are not proof that a particular hardware unit is saturated. The padding comparison has direct counter evidence, and the Thrust discussion has a recorded timeline.
+For the global scans, these explanations follow from the algorithms and timing patterns. Hardware counters were collected for the shared-memory padding comparison, and the Thrust timeline shows operations inside the library call. The results do not establish that the global scans reach the GPU's memory bandwidth limit.
 
 ### How were the measurements collected?
 
@@ -152,9 +155,9 @@ The memory and launch explanations for the global scans follow from the algorith
 | Input | Seed 565, values 0–3, same input per size across methods |
 | Timing | Provided chrono timer for CPU, CUDA events for GPU |
 
-The timers exclude initial memory allocation and input upload, as well as final output download and cleanup. Temporary buffers for recursive shared-memory scans are allocated before timing. Thrust's internal allocations within its scan call remain timed. Output validation and synchronization checks happen outside the timers.
+CPU scans use a host timer, and GPU scans use CUDA events. Initial allocation, input upload, output download, and cleanup are excluded. Shared-memory scan buffers are also allocated before timing. Allocations performed internally by `thrust::exclusive_scan` remain part of its measured cost. Each result is checked after timing. CUDA-event intervals include gaps between kernels as well as kernel execution.
 
-Power mode, whether the laptop was plugged in, and background activity were not controlled. Running configurations in a fixed order can affect results through clock changes, cached data, and temperature. The shortest CPU timings are close to the timer's resolution. These measurements describe this laptop session. They do not establish hardware limits or statistically significant differences.
+Power mode, AC power, and background activity were not controlled. Configurations ran in a fixed order, so temperature, clock speed, and cached data may affect the results. The shortest CPU timings are also close to the timer's resolution. Large differences are more useful here than small differences between nearby measurements.
 
 ## Optimizations and radix sort
 
@@ -164,7 +167,7 @@ All bars use 4,194,304 integers with each method's configuration selected at one
 
 ### Why can a GPU scan be slower than a CPU loop?
 
-**The short answer is because fewer additions do not guarantee a shorter runtime.** The CPU can start a simple loop immediately. Our global-memory GPU scans launch many kernels, and the tree scan runs out of useful parallel work near its root.
+**GPU launch overhead and idle threads can cost more time than a small CPU scan.** The CPU runs one simple loop. The global-memory efficient scan launches a kernel for every tree level, including levels with only a few useful operations.
 
 #### Why the basic approach wastes time
 
@@ -173,9 +176,9 @@ All bars use 4,194,304 integers with each method's configuration selected at one
 3. **A fixed launch grid creates threads that immediately exit.** Returning early avoids incorrect accesses and unnecessary arithmetic, but those blocks still have to be launched and scheduled. Many launched threads are not doing scan work.
 4. **Global-memory accesses still cost time.** Each tree level reads and writes device memory. A lower addition count does not by itself tell us how efficiently those accesses are served.
 
-This explains why the CPU wins on small inputs and why the naive scan can beat the work-efficient scan at medium sizes. We have not measured occupancy for each global-tree level, so the deeper-level explanation follows from the algorithm and launch sizes rather than a per-level counter experiment.
+These costs explain how an algorithm with fewer additions can still take longer. The shrinking amount of work follows from the tree structure. Occupancy was not measured separately at each tree level.
 
-#### What we changed
+#### How the optimization works
 
 The baseline, `Efficient::scanUnoptimized`, launches enough threads for the entire padded array at every level. Threads without a tree node return early.
 
@@ -191,11 +194,11 @@ The grid shrinks during the up-sweep and grows during the down-sweep. The final 
 
 #### Did the change help?
 
-At the **same 512-thread block size**, fixed-grid scan took **2.422 ms** and compact-grid scan **0.873 ms**: **2.77× faster**. Independently tuning the baseline selected 128 threads, where it took 2.096 ms. The optimized version still wins by 2.40×. Launching fewer blocks reduces wasted work. It does not remove the cost of each launch or create extra useful work near the root.
+**Launching only the threads needed for each level made efficient scan 2.77× faster at 4,194,304 elements.** At the same 512-thread block size, the fixed-grid version took **2.422 ms**, while the optimized version took **0.873 ms**. The baseline's best tested block size was 128 threads, with a time of 2.096 ms. The optimized version is still 2.40× faster than that result. It reduces wasted work, although each tree level still needs a separate launch.
 
 ### Radix sort using scan
 
-**Goal:** demonstrate how scan can place values in the correct order during sorting.
+Radix sort uses scan to calculate where each value belongs in the output.
 
 `Radix::sort` sorts signed 32-bit integers in 32 passes, starting with the least significant bit. Each pass separates values by the current bit while preserving their relative order within each group. Each pass marks values whose current bit is zero, scans that mask with the efficient GPU helper, and places those values before values whose bit is one. Flipping the sign bit in the comparison key puts negative values first without changing stored values.
 
@@ -211,11 +214,11 @@ StreamCompaction::Radix::sort(6, output, input);
 Radix example: -7 -1 0 2 3 3
 ```
 
-This demonstrates scan as a sorting building block. No claim is made that this educational binary radix sort outperforms library sort. Tests compare with `std::stable_sort`, including integer extremes, duplicates, sorted/reversed inputs, empty input, and one million elements. The tests check sorted values only. Preserving the order of equal keys follows from the placement formula, but it is not independently tested with attached key/value pairs.
+Tests compare the output with `std::stable_sort` for integer extremes, duplicates, sorted and reversed inputs, empty input, and one million elements. Stability follows from preserving input order during each partition. The tests verify sorted values without attached key/value pairs. This implementation demonstrates scan's role in sorting. Sorting performance was not compared with a library implementation.
 
 ### Shared memory and bank padding
 
-**Goal:** keep a tile's intermediate scan values close to its threads instead of repeatedly sending them through global memory.
+Shared-memory scan keeps intermediate values within each block. This reduces global-memory traffic and the number of kernel launches.
 
 `Shared::scanNaive` implements the shared-memory Hillis–Steele approach from GPU Gems Example 39.1. `Shared::scanUnpadded` implements the Blelloch block tree from Example 39.2. `Shared::scan` adds one padding word per 32 logical shared-memory words to reduce bank conflicts on the modern 32-bank device.
 
@@ -227,19 +230,21 @@ All three versions handle array sizes that do not fit evenly into blocks. They s
 | Shared tree, unpadded | 128 | 256 | 1,024 bytes | 0.396224 |
 | Shared tree, padded | 128 | 256 | 1,056 bytes | 0.292864 |
 
-Padded tree scan is **1.35× faster** than the unpadded version at the same block size. The [matched Nsight Compute captures](#does-padding-actually-remove-bank-conflicts) independently show that padding removes reported shared-memory bank conflicts in the first large scan stage. This supports the explanation that padding helps by reducing conflicts. It does not prove that this counter explains every part of the whole-scan speedup.
+Padded tree scan is **1.35× faster** than the unpadded version at the same block size. The [Nsight Compute comparison](#does-padding-actually-remove-bank-conflicts) shows why padding helps. It removes the reported bank conflicts in the first scan stage, allowing shared-memory requests to be served with less work.
 
 At 128 threads, the tree processes 256 values per block. Four million values require three scan levels and two offset-add launches: five kernels instead of 44 global tree passes. Intermediate values used by each block's tree stay in shared memory. This reduces both global traffic and launch count.
 
-Padded storage grows as `4 × (2B + floor(2B/32))` bytes per block. Higher shared-memory use can reduce resident blocks per SM. Register and thread limits matter too. A separate large padded-kernel capture measured **93.50% achieved occupancy** at 128 threads per block. It does not establish occupancy for the other block sizes in the sweep.
+For `B` threads, padded storage uses `4 × (2B + floor(2B/32))` bytes per block. Increasing shared-memory use can limit how many blocks fit on one streaming multiprocessor, or SM. Registers and thread counts also affect this limit. At 128 threads per block, the large padded-kernel capture measured **93.50% achieved occupancy**. Other block sizes may have different occupancy.
 
 ## Profiler evidence
 
-Benchmarks answer **which implementation is faster**. Profilers help explain **where the time goes**. The sections below keep three measurements separate: the median time for a whole scan, the duration of one profiled kernel, and the time between CPU-side API calls.
+The benchmarks compare complete scans. The profiler captures explain the costs inside them, including bank conflicts, GPU utilization, and operations performed by Thrust. A single kernel's duration and a CPU library call's duration measure different parts of the work.
 
 ### Does padding actually remove bank conflicts?
 
-Nsight Compute 2026.2.1 captured the first `kernTreeBlocks` launch for each shared tree variant. Both used a Release build, **1,048,576 ones**, three warm-ups, **4,096 blocks × 128 threads**, kernel replay, and the full metric set. Each block scans 256 values. The two captures measure the same first stage. They do not include all recursive scan stages and the kernels that add block offsets.
+**Padding reduced the reported bank conflicts from 1,146,880 to zero in the measured kernel.** Its duration fell from **76.90 µs to 43.62 µs**, a **1.76× speedup**.
+
+Nsight Compute 2026.2.1 measured the first `kernTreeBlocks` launch for both shared tree variants. Each used a Release build, **1,048,576 ones**, three warm-ups, and **4,096 blocks of 128 threads**. Each block scans 256 values. These captures use kernel replay and the full metric set, and cover only the first scan stage.
 
 | First-stage measurement | Unpadded | Padded |
 |---|---:|---:|
@@ -252,13 +257,13 @@ Nsight Compute 2026.2.1 captured the first `kernTreeBlocks` launch for each shar
 | Shared store wavefronts | 614,400 | 184,320 |
 | Registers/thread | 17 | 19 |
 
-**The kernel asks for the same data, but memory needs less work to serve it.** The unpadded launch reports **1,146,880 bank conflicts**. The padded launch reports zero. Combined load/store wavefronts fall from 1,618,899 to 467,352, about **71.1% fewer**. These counts do not include the separate `Other` wavefront row. The profiler's bank-conflict column is used directly. Total wavefronts minus requests is not treated as an exact bank-conflict count.
+Both kernels issue the same number of shared-memory load and store requests. With padding, those requests need fewer service operations, called wavefronts. Combined load and store wavefronts fall from 1,618,899 to 467,352, about **71.1% fewer**. This total excludes the profiler's `Other` row. Bank-conflict counts come directly from the profiler's bank-conflict column.
 
 Shared memory has 32 banks. Tree strides can send threads to different words in the same bank, which requires extra work to serve the accesses. The padded index `index + index / 32` changes that mapping. A wavefront is a unit of work needed to service memory accesses, not a CUDA warp. See NVIDIA's [shared-memory metric definitions](https://docs.nvidia.com/nsight-compute/ProfilingGuide/#shared-memory).
 
-The observed kernel speedup is **76.90 / 43.62 = 1.76×**, or **43.3% less kernel time**, despite the padded kernel using two more registers per thread. This directly supports using bank padding for this configuration. These are individual profiler captures, not repeated-run averages. The **1.35× whole-scan benchmark speedup at four million elements** remains a separate result. Padding does not remove arithmetic, synchronization, or the remaining scan stages.
+The complete scan improves by **1.35× at four million elements**, less than the **1.76×** improvement in this individual kernel capture. The full operation also includes other scan stages, synchronization, and kernels that add block offsets. Padding reduces bank conflicts but leaves those costs in place. The kernel figures are individual profiler measurements, while the full-scan figures are medians from repeated benchmarks.
 
-#### Original Nsight Compute screenshots
+#### Nsight Compute screenshots
 
 **Unpadded: bank conflicts and additional wavefronts.** Open the image at full size to read the counters. The header preserves the launch dimensions and duration.
 
@@ -270,15 +275,17 @@ The observed kernel speedup is **76.90 / 43.62 = 1.76×**, or **43.3% less kerne
 
 ### What does occupancy tell us?
 
-Occupancy measures active warps relative to the number an SM can hold. An SM is a GPU processing unit, and a warp is a group of 32 threads. Theoretical occupancy describes what the kernel's resource needs allow. Achieved occupancy describes what happened during execution.
+**Occupancy shows how much of an SM's capacity for active warps is being used.** A warp is a group of 32 threads. Higher occupancy gives the GPU more warps to choose from when others are waiting. It does not guarantee faster execution because memory access, instruction dependencies, and synchronization still matter.
 
-A separate padded-kernel overview capture with the same large input and launch dimensions reports **100% theoretical occupancy**, **93.50% achieved occupancy**, **67.59% compute throughput**, and **28.60% DRAM throughput**. Its duration is 43.78 µs. It is not the 43.62 µs bank-table capture above.
+Theoretical occupancy is the limit allowed by a kernel's resource needs. Achieved occupancy is the measured use of that capacity during execution.
 
-At 128 threads per block, each block has four warps. The report permits 12 resident blocks per SM, giving 48 warps. Its achieved average is 44.88 warps, or `44.88 / 48 = 93.50%`. This large launch gives the GPU enough blocks to keep its SMs busy. High occupancy gives the scheduler more warps to choose from, but does not mean all instructions issue without stalls or that DRAM bandwidth is saturated.
+The large padded-kernel overview reports **100% theoretical occupancy** and **93.50% achieved occupancy**. It also reports **67.59% compute throughput** and **28.60% DRAM throughput**. This capture uses the same input and launch dimensions as the padding comparison, with a measured duration of 43.78 µs.
 
-For contrast, an exploratory **one-block, 64-thread** capture reports 100% theoretical but only **3.95% achieved occupancy** and a Small Grid warning. One block cannot spread across all 20 SMs. This shows why theoretical occupancy alone cannot tell us how much of the GPU will actually be used. Its input size and scan stage were not recorded, and its block size differs, so it is **not** a controlled small-versus-large speed comparison or direct evidence about the global scan's deeper tree levels.
+At 128 threads per block, each block has four warps. The report permits 12 resident blocks per SM, giving 48 warps. Its achieved average is 44.88 warps, or `44.88 / 48 = 93.50%`. This large launch provides enough blocks to make use of most of the available warp capacity.
 
-#### Original occupancy screenshots
+A **one-block, 64-thread** capture reports 100% theoretical occupancy but only **3.95% achieved occupancy**, along with a Small Grid warning. One block cannot spread across all 20 SMs. This illustrates why a kernel can have a high theoretical occupancy limit while leaving much of the GPU idle. The input size and scan stage were not recorded, so this image illustrates the small-grid problem without providing a controlled performance comparison.
+
+#### Occupancy screenshots
 
 ![Large padded shared scan launch, throughput, and achieved occupancy](img/shared-padded-large-1.png)
 
@@ -286,19 +293,21 @@ For contrast, an exploratory **one-block, 64-thread** capture reports 100% theor
 
 ### Why does a Thrust call take longer than its GPU kernels?
 
+**Thrust also allocates temporary memory, launches the kernels, waits for GPU work to finish, and frees the temporary memory.** The time spent inside `thrust::exclusive_scan` includes all of these operations. Adding up the GPU kernel durations counts only the work executing on the GPU.
+
 ![Nsight Systems timeline showing Thrust CCCL ranges, CUDA API calls, and GPU activity](img/thrust-nvtx-profile.png)
 
-The Nsight Systems capture shows one warmed Thrust scan on **262,144 ones**, with both CUDA and NVTX tracing enabled. The **CCCL** row identifies library calls, the **CUDA API** row shows their allocation, launch, synchronization, and cleanup operations, and the **CUDA HW** row summarizes GPU kernel and memory activity.
+In this capture, one scan of **262,144 ones**, after three warm-up calls, takes **919.250 µs** inside the CPU library call. Its two GPU scan kernels take **6.944 µs** in total. Most of the call's elapsed time is therefore spent outside those kernels. The timeline shows temporary allocation, synchronization, and cleanup contributing to that difference, along with time between GPU operations.
 
-The outer `thrust::exclusive_scan` range lasts **919.250 µs**. The nested **915.382 µs** range is another layer of the same CPU library call, not a second GPU scan. Aligned beneath these ranges, the CUDA API row shows temporary `cudaMalloc`, kernel launches, `cudaStreamSynchronize`, and `cudaFree`. The call's CPU-side duration therefore includes more than the GPU's scan calculations. The surrounding copy and initialization ranges belong to vector setup and output transfer, outside the scan call.
+To read the screenshot, follow the `thrust::exclusive_scan` bar in the **CCCL** row. Directly below it, the **CUDA API** row shows `cudaMalloc`, kernel launches, `cudaStreamSynchronize`, and `cudaFree`. The two nested scan bars represent layers of the same CPU call. The **CUDA HW** row shows the much shorter GPU activity. Copy and initialization bars outside the scan range belong to input setup and output transfer.
 
-The exported trace identifies `DeviceScanInitKernel` and `DeviceScanKernel` as the scan's GPU kernels, totaling **6.944 µs**. Their names are not readable at this screenshot's zoom level. A separate CUB `static_kernel` initializes the output vector before the scan. The NVTX duration measures the CPU call, while kernel durations measure GPU execution; neither should replace the unprofiled CUDA-event timings in the performance graph.
-
-Memory allocation, waiting, and scheduling contribute to the observed Thrust timings. This does **not** establish the exact cause of the size-dependent step in the scaling plot; a matched smaller-input trace would be needed. Profiled durations remain separate from the unprofiled benchmark results because profiling changes how the program runs.
+The exported trace identifies the two scan kernels as `DeviceScanInitKernel` and `DeviceScanKernel`. A separate `static_kernel` initializes the output vector before the scan. Their names are too small to read at this zoom level. These profiled durations explain the difference between a library call and its kernels. The performance graph uses separate, unprofiled CUDA-event measurements because profiling adds overhead.
 
 ### What the evidence does and does not show
 
-The figures show how runtime changes with input size, how block size affects performance, and how padding reduces bank conflicts. The Thrust timeline shows time spent outside GPU kernels. These observations do not identify every bottleneck. Comparing early and late global-tree passes, or small and large Thrust calls, would help explain the remaining differences. Those experiments have not been performed here. Profiler warnings suggest things to investigate. Their estimated speedups are not actual improvements measured by this project. See the [Systems guide](https://docs.nvidia.com/nsight-systems/UserGuide/) and [Compute guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/).
+The measurements support three conclusions. Input size changes which scan is fastest, padding removes the reported conflicts in the measured shared-memory kernel, and Thrust spends time on operations around its GPU kernels.
+
+The exact memory-bandwidth limit of the global scans and the cause of Thrust's sudden timing increase in the scaling plot remain unmeasured. Resolving them would require hardware counters for the global scans and comparable Thrust traces at smaller and larger sizes. See the [Systems guide](https://docs.nvidia.com/nsight-systems/UserGuide/) and [Compute guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/) for the profiler metrics.
 
 ## Build and reproduce
 
@@ -329,9 +338,21 @@ With `nsys` on your PATH, capture the Thrust call using:
 nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --output=thrust-nvtx-profile .\build\bin\Release\extra_tests.exe --profile thrust 262144
 ```
 
-Open the resulting report and expand the calling thread's **CCCL** NVTX row, **CUDA API** row, and the GPU's kernel/stream rows. Zoom to `thrust::exclusive_scan` while keeping nearby allocations and copies visible. With the installed CUDA 13.3 headers, Thrust supplies the CCCL annotations automatically. The nested `thrust::exclusive_scan` ranges describe nested CPU library calls, not two separate GPU scans. Use the GPU rows to see the actual kernels. See the [Nsight Systems guide](https://docs.nvidia.com/nsight-systems/UserGuide/).
+Open the resulting report and expand the calling thread's **CCCL** NVTX row, **CUDA API** row, and the GPU's kernel/stream rows. Zoom to `thrust::exclusive_scan` while keeping nearby allocations and copies visible. The CUDA 13.3 headers used for this project supply Thrust's CCCL annotations automatically. See the [Nsight Systems guide](https://docs.nvidia.com/nsight-systems/UserGuide/) for tracing options.
 
-For the matched Nsight Compute comparison, use the Release `extra_tests.exe` with arguments `--profile shared 1048576`, then `--profile shared-unpadded 1048576`. Set **Profile From Start: No**, **Replay Mode: Kernel**, **Kernel Name Base: Function**, **Kernel Name: kernTreeBlocks**, both launch skip counts to **0**, and launch capture count to **1**. Select the **full** metric set, including `MemoryWorkloadAnalysis_Tables`, and save separate reports. Expand Memory Workload Analysis to show its Shared Memory table. Raw `.ncu-rep` files stay in the ignored `analysis/` directory. The original GUI screenshots and transcribed values are included here.
+To reproduce the Nsight Compute padding comparison, profile the Release `extra_tests.exe` with `--profile shared 1048576` and `--profile shared-unpadded 1048576` in separate runs. Use these settings:
+
+| Setting | Value |
+|---|---|
+| Profile From Start | No |
+| Replay Mode | Kernel |
+| Kernel Name Base | Function |
+| Kernel Name | kernTreeBlocks |
+| Both launch skip counts | 0 |
+| Launch capture count | 1 |
+| Metric set | Full, including `MemoryWorkloadAnalysis_Tables` |
+
+Open the Shared Memory table under Memory Workload Analysis to compare bank conflicts. The screenshots above preserve the measured counters and launch dimensions.
 
 ### CMake changes
 
@@ -339,16 +360,17 @@ For the matched Nsight Compute comparison, use the Release `extra_tests.exe` wit
 - The root build adds `extra_tests` and registers it with CTest.
 - A local `analysis` target is created only when its ignored source file exists.
 - The MSVC-only `/Zc:preprocessor` option is passed through NVCC for CUDA and Thrust compatibility.
-- Both host and CUDA sources use C++17. The CMake 3.18–3.22 compatibility branch has its target-name typo corrected (`stream_compaction`, without a trailing brace).
-- During automation, duplicate `PATH` and `Path` entries had to be combined into one entry in the build process's environment.
+- The target name in the CMake 3.18–3.22 compatibility branch is corrected to `stream_compaction` by removing an extra brace.
+
+The starter already selects C++17 for host and CUDA sources. Its outdated C++11 comment is corrected. If an automated Windows build cannot detect the compiler, check for duplicate `PATH` and `Path` environment entries. Combining them into one entry resolved compiler detection in the tested environment.
 
 ## Correctness and test output
 
 ### What was tested
 
-The test output and benchmark checks below passed. Profiling captures are separate from these correctness results.
+**All required scan and compaction implementations passed independent correctness checks.** Expected scan results come from `std::exclusive_scan`, and expected compaction results come from `std::copy_if`. The tests check values, retained-element counts, and output boundaries.
 
-The local test harness compares results with independent `std::exclusive_scan` and `std::copy_if` references. It checks output values, compaction counts, and a marker at the end of the allocated output to catch writes beyond the input length. Every timed scan output is also checked across all block-size candidates. The included `extra_tests` suite additionally checks that the entire output tail after a compaction's returned count remains untouched.
+The benchmark harness also validated each timed scan across all block sizes. Its output below covers zero-filled arrays, arrays of ones, mixed signed values, trailing zeros, and sizes up to one million. This harness is not included in the repository. The included `extra_tests` executable provides the required correctness checks described in the next section.
 
 ```text
 PASS: 528 independent scan/compaction checks
@@ -367,7 +389,9 @@ Measured n=4194304
 
 ### Additional test results
 
-A fresh Release build in `build/audit` passed CTest on the RTX 4050. The included `extra_tests` executable checks all four required scans and all three required compaction methods against independent standard-library references. Its 336 required checks cover the 12 sizes and four patterns listed above, including one million elements and empty inputs. It verifies compaction counts and ensures the unused output tail is untouched. These checks run from a fresh clone without the ignored analysis harness.
+**The included test suite passed 336 required checks and 1,058 extra-credit checks in a Release build on the RTX 4050.** Run it with the CTest command in [Build and run the tests](#build-and-run-the-tests).
+
+The `extra_tests` executable checks all four required scans and all three required compaction methods against independent standard-library references. The required checks cover the 12 sizes and four patterns listed above, including empty inputs and one million elements. They also verify that compaction leaves the unused output tail untouched.
 
 It also exercises all three shared scans and the fixed-grid baseline at four block sizes, then signed radix sorting:
 
@@ -377,7 +401,7 @@ Radix example: -7 -1 0 2 3 3
 PASS: 1058 extra-credit checks
 ```
 
-Inactive threads can overflow an integer while calculating a tree index for large inputs. Kernels avoid this by returning before calculating an inactive node's index. The full test sweep passed. No memory-sanitizer run is claimed.
+The tree kernels check whether a thread has work before calculating its node index. This prevents inactive threads from overflowing the index calculation for large inputs. These are output correctness tests. They do not include a memory-sanitizer run.
 
 ### Starter test output
 
