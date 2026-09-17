@@ -286,25 +286,15 @@ For contrast, an exploratory **one-block, 64-thread** capture reports 100% theor
 
 ### Why does a Thrust call take longer than its GPU kernels?
 
-![Original Nsight Systems GUI timeline showing Thrust wrapper CUDA API calls](img/thrust-profiler.png)
+![Nsight Systems timeline showing Thrust CCCL ranges, CUDA API calls, and GPU activity](img/thrust-nvtx-profile.png)
 
-The original Nsight Systems screenshot shows memory allocation, waits for GPU work to finish, memory cleanup, and copies around short GPU operations. At this zoom, kernel names are not readable. The figure built from recorded timestamps and the table below provide the detail. The visible interval includes the wrapper, so not every allocation or copy shown belongs inside the timed scan.
+The Nsight Systems capture shows one warmed Thrust scan on **262,144 ones**, with both CUDA and NVTX tracing enabled. The **CCCL** row identifies library calls, the **CUDA API** row shows their allocation, launch, synchronization, and cleanup operations, and the **CUDA HW** row summarizes GPU kernel and memory activity.
 
-![Thrust CUDA API and GPU timeline from an Nsight Systems capture](img/thrust-timeline.png)
+The outer `thrust::exclusive_scan` range lasts **919.250 µs**. The nested **915.382 µs** range is another layer of the same CPU library call, not a second GPU scan. Aligned beneath these ranges, the CUDA API row shows temporary `cudaMalloc`, kernel launches, `cudaStreamSynchronize`, and `cudaFree`. The call's CPU-side duration therefore includes more than the GPU's scan calculations. The surrounding copy and initialization ranges belong to vector setup and output transfer, outside the scan call.
 
-This figure is reconstructed from actual Nsight Systems timestamps for one warmed Thrust call on 262,144 ones. It includes wrapper allocation, upload, scan, download, and cleanup. Dashed markers are the **host calls that record timing events**, not device event completion timestamps. The profiler-start overhead is excluded from this view.
+The exported trace identifies `DeviceScanInitKernel` and `DeviceScanKernel` as the scan's GPU kernels, totaling **6.944 µs**. Their names are not readable at this screenshot's zoom level. A separate CUB `static_kernel` initializes the output vector before the scan. The NVTX duration measures the CPU call, while kernel durations measure GPU execution; neither should replace the unprofiled CUDA-event timings in the performance graph.
 
-The capture contains three GPU kernels:
-
-| Observed kernel | Duration |
-|---|---:|
-| CUB `static_kernel` during vector setup | 2.656 µs |
-| CUB `DeviceScanInitKernel` | 1.056 µs |
-| CUB `DeviceScanKernel` | 5.920 µs |
-
-Between the two event-record API calls, the trace shows a temporary `cudaMalloc`, the scan initialization and scan launches, a `cudaStreamSynchronize`, and `cudaFree`. The timed Thrust call therefore includes more than the GPU's scan calculations. The two scan kernels total approximately **6.98 µs** in this profiled call. The event-record host calls are roughly **0.759 ms** apart. Those are different quantities and must not be substituted for the unprofiled benchmark median.
-
-This shows that memory allocation, waiting, and scheduling contribute to the observed Thrust timings. It does **not** establish the exact cause of the size-dependent step in the scaling plot. A matched smaller-input trace would be needed. Times taken from the trace are kept separate from benchmark results because profiling changes how the program runs.
+Memory allocation, waiting, and scheduling contribute to the observed Thrust timings. This does **not** establish the exact cause of the size-dependent step in the scaling plot; a matched smaller-input trace would be needed. Profiled durations remain separate from the unprofiled benchmark results because profiling changes how the program runs.
 
 ### What the evidence does and does not show
 
@@ -331,7 +321,15 @@ The `extra_tests` target is included in the repository and registered with CTest
 .\build\bin\Release\extra_tests.exe --profile thrust 262144
 ```
 
-Supported profile method names are `thrust`, `efficient`, `shared`, `shared-unpadded`, and `naive`. The program warms up three calls, then surrounds one call with `cudaProfilerStart/Stop`. Enable CUDA tracing and capture that range in Nsight Systems.
+Supported profile method names are `thrust`, `efficient`, `shared`, `shared-unpadded`, and `naive`. The program warms up three calls, then surrounds one call with `cudaProfilerStart/Stop`. In Nsight Systems, enable both **CUDA** and **NVTX** tracing and capture the **CUDA profiler API** range. CPU sampling and context-switch tracing are unnecessary for this view.
+
+With `nsys` on your PATH, capture the Thrust call using:
+
+```powershell
+nsys profile --trace=cuda,nvtx --sample=none --cpuctxsw=none --capture-range=cudaProfilerApi --capture-range-end=stop --output=thrust-nvtx-profile .\build\bin\Release\extra_tests.exe --profile thrust 262144
+```
+
+Open the resulting report and expand the calling thread's **CCCL** NVTX row, **CUDA API** row, and the GPU's kernel/stream rows. Zoom to `thrust::exclusive_scan` while keeping nearby allocations and copies visible. With the installed CUDA 13.3 headers, Thrust supplies the CCCL annotations automatically. The nested `thrust::exclusive_scan` ranges describe nested CPU library calls, not two separate GPU scans. Use the GPU rows to see the actual kernels. See the [Nsight Systems guide](https://docs.nvidia.com/nsight-systems/UserGuide/).
 
 For the matched Nsight Compute comparison, use the Release `extra_tests.exe` with arguments `--profile shared 1048576`, then `--profile shared-unpadded 1048576`. Set **Profile From Start: No**, **Replay Mode: Kernel**, **Kernel Name Base: Function**, **Kernel Name: kernTreeBlocks**, both launch skip counts to **0**, and launch capture count to **1**. Select the **full** metric set, including `MemoryWorkloadAnalysis_Tables`, and save separate reports. Expand Memory Workload Analysis to show its Shared Memory table. Raw `.ncu-rep` files stay in the ignored `analysis/` directory. The original GUI screenshots and transcribed values are included here.
 
